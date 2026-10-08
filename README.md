@@ -149,6 +149,18 @@ class Post extends Model
 - `BelongsTo`, `MorphTo`, `HasManyThrough` and `HasOneThrough` are recorded for reference only — restoring them would either duplicate data owned by other records or is not directly writable, so their snapshots are never applied. A `BelongsTo` foreign key is still restored like any other versioned attribute when listed in `$versionable`.
 - Models that don't use the concern behave exactly as before.
 
+**Revisions page — per-relation change sets with field-level diffs:**
+
+![Relationship diff on the revisions page](.github/images/relationships-diff.png)
+
+**Automatic restore** — after restoring a revision, the edit form shows the relationships exactly as they were in that revision (removed children are gone, modified children are reverted):
+
+![Relationships automatically restored after revision restore](.github/images/relationships-auto-restored.png)
+
+**Removed records** are tracked too:
+
+![Removed relationship record badge](.github/images/relationships-removed.png)
+
 ## Customisation
 
 If you want to change the UI for Revisions page, you may publish the publish the views to do so.
