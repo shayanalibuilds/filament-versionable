@@ -13,8 +13,8 @@ class RelationChangeSet
      * @param  list<RelationRecordChange>  $added
      * @param  list<RelationRecordChange>  $removed
      * @param  list<RelationRecordChange>  $updated
-     * @param  array<string, array<string, array{old: ?string, new: ?string, html: string}>>|null  $oldState
-     * @param  array<string, array<string, array{old: ?string, new: ?string, html: string}>>|null  $newState
+     * @param  array<string, array<string, mixed>>|null  $oldState
+     * @param  array<string, array<string, mixed>>|null  $newState
      * @param  int  $unchanged  number of untouched records
      */
     public function __construct(

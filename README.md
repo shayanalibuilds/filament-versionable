@@ -139,14 +139,54 @@ class Post extends Model
 
     protected $versionable = ['title', 'content'];
 
+    // Simple form: just list the relationship names.
     protected array $versionableRelations = ['comments', 'tags'];
 }
 ```
 
+### Per-relation configuration
+
+Every relationship can also be configured: what the revisions page shows, and how a snapshotted record is re-identified on restore when its primary key no longer matches (deleted and re-created rows, restores into another environment, ...):
+
+```php
+protected array $versionableRelations = [
+    'comments' => [
+        // Shown next to the record key on the revisions page instead of a bare
+        // "#5". Accepts an attribute name or a callable:
+        // fn (array $attributes, int|string $key) => string.
+        'title' => 'author',
+
+        // Which snapshot attributes to render on the revisions page
+        // (default: all of them).
+        'fields' => ['author', 'body'],
+
+        // Stable columns used to re-identify a row on restore when its
+        // primary key is gone (optional).
+        'identity' => ['author', 'body'],
+
+        // Re-create missing children with their original primary key when
+        // that key is still free (default: true).
+        'preserve_ids' => true,
+    ],
+
+    // Unconfigured relations keep the defaults.
+    'tags',
+];
+```
+
+Without any configuration a sensible title is guessed from common attribute
+names (`name`, `title`, `label`, `author`, `email`, `username`, `slug`), so
+rows never show a naked primary key.
+
 - Every created version stores a snapshot of the listed relationships, and the revisions page renders per-relation change sets (added / updated / removed records with field-level diffs, plus pivot column changes).
 - When **only** a relationship changes, Filament's attribute watcher would normally create no version at all — the plugin now records one automatically after Filament saves the record.
-- Restoring a revision automatically restores the relationship state as well: children are updated or recreated by primary key, soft-deleted children are revived, children missing from the snapshot are removed, and pivot relations are synced (including pivot columns).
-- `BelongsTo`, `MorphTo`, `HasManyThrough` and `HasOneThrough` are recorded for reference only — restoring them would either duplicate data owned by other records or is not directly writable, so their snapshots are never applied. A `BelongsTo` foreign key is still restored like any other versioned attribute when listed in `$versionable`.
+- Restoring a revision automatically restores the relationship state as well. Each snapshotted record is resolved against the current database in tiers — always scoped to the relation's own constraint, so rows of other parents are never touched:
+    1. **Primary key** — the normal, untouched case (soft-deleted children are revived).
+    2. **Attribute fingerprint** — every snapshotted attribute matches exactly; covers rows that were deleted and re-created with the same data, and restores into environments where the same data has different keys.
+    3. **Identity columns** — the stable columns you designate via `'identity'`; covers rows that were legitimately edited since the snapshot.
+    4. **Re-create** — nothing identifiable: the child is re-created, with its original primary key when that key is still free and `preserve_ids` is enabled.
+- Children missing from the snapshot are removed, pivot relations are synced (including pivot columns, re-linked to re-created master records), and a `BelongsTo` foreign key pointing at a since re-created row is re-pointed automatically.
+- `MorphTo`, `HasManyThrough` and `HasOneThrough` are recorded for reference only — restoring them would either duplicate data owned by other records or is not directly writable, so their snapshots are never applied. A `BelongsTo` foreign key is still restored like any other versioned attribute when listed in `$versionable`.
 - Models that don't use the concern behave exactly as before.
 
 **Revisions page — per-relation change sets with field-level diffs:**

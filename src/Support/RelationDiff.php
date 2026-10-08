@@ -36,10 +36,15 @@ class RelationDiff
         $changeSets = [];
 
         foreach ($newRelations + $oldRelations as $name => $_) {
+            $config = RelationDisplay::configFor($this->newVersion, $name);
+            $configuredFields = RelationDisplay::fields($config);
+
             $changeSet = $this->compareRelation(
                 name: $name,
                 old: $oldRelations[$name] ?? null,
                 new: $newRelations[$name] ?? null,
+                config: $config,
+                configuredFields: $configuredFields,
             );
 
             if ($changeSet->hasChanges()) {
@@ -53,8 +58,10 @@ class RelationDiff
     /**
      * @param  array<string, mixed>|null  $old
      * @param  array<string, mixed>|null  $new
+     * @param  array{title: string|callable|null, fields: list<string>|callable|null, identity: list<string>, preserve_ids: bool}  $config
+     * @param  list<string>|null  $configuredFields
      */
-    protected function compareRelation(string $name, ?array $old, ?array $new): RelationChangeSet
+    protected function compareRelation(string $name, ?array $old, ?array $new, array $config, ?array $configuredFields): RelationChangeSet
     {
         $type = $new['type'] ?? $old['type'] ?? 'unknown';
         $displayOnly = (bool) ($new['display_only'] ?? $old['display_only'] ?? false);
@@ -68,7 +75,7 @@ class RelationDiff
         );
 
         if ($displayOnly && in_array($type, ['belongsTo', 'morphTo'], true)) {
-            $this->compareSingleRecord($changeSet);
+            $this->compareSingleRecord($changeSet, $config, $configuredFields);
 
             return $changeSet;
         }
@@ -82,7 +89,8 @@ class RelationDiff
                     key: $key,
                     old: null,
                     new: $newRecord,
-                    fields: $this->renderRecordFields(null, $newRecord),
+                    fields: $this->renderRecordFields(null, $newRecord, $configuredFields),
+                    displayLabel: RelationDisplay::label($config, $newRecord, $key),
                 );
 
                 continue;
@@ -100,7 +108,8 @@ class RelationDiff
                 key: $key,
                 old: $oldRecord,
                 new: $newRecord,
-                fields: $this->renderChangedFields($oldRecord, $newRecord),
+                fields: $this->renderChangedFields($oldRecord, $newRecord, $configuredFields),
+                displayLabel: RelationDisplay::label($config, $newRecord, $key),
             );
         }
 
@@ -110,7 +119,8 @@ class RelationDiff
                     key: $key,
                     old: $oldRecord,
                     new: null,
-                    fields: $this->renderRecordFields($oldRecord, null),
+                    fields: $this->renderRecordFields($oldRecord, null, $configuredFields),
+                    displayLabel: RelationDisplay::label($config, $oldRecord, $key),
                 );
             }
         }
@@ -121,8 +131,11 @@ class RelationDiff
     /**
      * Compare single-record relations (belongsTo / morphTo): the related
      * record itself is never restored, the change is shown for reference.
+     *
+     * @param  array{title: string|callable|null, fields: list<string>|callable|null, identity: list<string>, preserve_ids: bool}  $config
+     * @param  list<string>|null  $configuredFields
      */
-    protected function compareSingleRecord(RelationChangeSet $changeSet): void
+    protected function compareSingleRecord(RelationChangeSet $changeSet, array $config, ?array $configuredFields): void
     {
         $oldRecord = $changeSet->oldState !== null ? ($changeSet->oldState[array_key_first($changeSet->oldState)] ?? null) : null;
         $newRecord = $changeSet->newState !== null ? ($changeSet->newState[array_key_first($changeSet->newState)] ?? null) : null;
@@ -138,22 +151,31 @@ class RelationDiff
             key: $newKey ?? $oldKey ?? '?',
             old: $oldRecord,
             new: $newRecord,
-            fields: $this->renderChangedFields($oldRecord ?? [], $newRecord ?? []),
+            fields: $this->renderChangedFields($oldRecord ?? [], $newRecord ?? [], $configuredFields),
+            displayLabel: RelationDisplay::label($config, $newRecord ?? $oldRecord ?? [], $newKey ?? $oldKey ?? '?'),
         );
     }
 
     /**
-     * Render every field of a fully added or removed record.
+     * Render every field of a fully added or removed record, limited to the
+     * configured fields when a field subset is configured.
      *
      * @param  array<string, mixed>|null  $old
      * @param  array<string, mixed>|null  $new
+     * @param  list<string>|null  $configuredFields
      * @return array<string, array{old: ?string, new: ?string, html: string}>
      */
-    protected function renderRecordFields(?array $old, ?array $new): array
+    protected function renderRecordFields(?array $old, ?array $new, ?array $configuredFields): array
     {
         $fields = [];
 
-        foreach (array_keys($new ?? $old ?? []) as $field) {
+        $record = $new ?? $old ?? [];
+
+        $keys = $configuredFields !== null
+            ? array_values(array_intersect($configuredFields, array_keys($record)))
+            : array_keys($record);
+
+        foreach ($keys as $field) {
             $oldValue = $old === null ? null : static::stringify($old, $field);
             $newValue = $new === null ? null : static::stringify($new, $field);
 
@@ -168,17 +190,23 @@ class RelationDiff
     }
 
     /**
-     * Render only the fields that changed between two record snapshots.
+     * Render only the fields that changed between two record snapshots,
+     * limited to the configured fields when a field subset is configured.
      *
      * @param  array<string, mixed>  $oldRecord
      * @param  array<string, mixed>  $newRecord
+     * @param  list<string>|null  $configuredFields
      * @return array<string, array{old: ?string, new: ?string, html: string}>
      */
-    protected function renderChangedFields(array $oldRecord, array $newRecord): array
+    protected function renderChangedFields(array $oldRecord, array $newRecord, ?array $configuredFields): array
     {
         $fields = [];
 
-        foreach (array_keys($oldRecord + $newRecord) as $field) {
+        $keys = $configuredFields !== null
+            ? array_values(array_intersect($configuredFields, array_keys($oldRecord + $newRecord)))
+            : array_keys($oldRecord + $newRecord);
+
+        foreach ($keys as $field) {
             $oldValue = static::stringify($oldRecord, $field);
             $newValue = static::stringify($newRecord, $field);
 

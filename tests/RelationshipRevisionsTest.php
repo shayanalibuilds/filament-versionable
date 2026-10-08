@@ -1,11 +1,15 @@
 <?php
 
 use Filament\Resources\Events\RecordSaved;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Mansoor\FilamentVersionable\Support\RelationChangeSet;
+use Mansoor\FilamentVersionable\Support\RelationDiff;
 use Mansoor\FilamentVersionable\Support\RelationSnapshotManager;
 use Mansoor\FilamentVersionable\Tests\Fixtures\Models\Attachment;
 use Mansoor\FilamentVersionable\Tests\Fixtures\Models\Category;
 use Mansoor\FilamentVersionable\Tests\Fixtures\Models\Comment;
+use Mansoor\FilamentVersionable\Tests\Fixtures\Models\ConfiguredVersionablePost;
 use Mansoor\FilamentVersionable\Tests\Fixtures\Models\Post;
 use Mansoor\FilamentVersionable\Tests\Fixtures\Models\Project;
 use Mansoor\FilamentVersionable\Tests\Fixtures\Models\SeoMeta;
@@ -434,9 +438,304 @@ describe('revisions page rendering', function () {
             ->and($comments->added)->toHaveCount(1)
             ->and($comments->removed)->toHaveCount(1)
             ->and($comments->updated)->toHaveCount(1)
-            ->and($comments->added[0]->label())->toBe('#3')
+            ->and($comments->added[0]->label())->toBe('#3 · Carol')
             ->and($comments->added[0]->new['author'])->toBe('Carol')
             ->and($comments->removed[0]->key)->toBe(2)
             ->and($comments->updated[0]->fields)->toHaveKey('body');
+    });
+});
+
+describe('identity resolution', function () {
+    function restoreVersionDirectly(VersionablePost|ConfiguredVersionablePost $post): void
+    {
+        $latest = $post->latestVersion()->first();
+        $target = $latest->previousVersion();
+
+        expect($target)->not->toBeNull();
+
+        DB::transaction(function () use ($target): void {
+            $target->revert();
+
+            $record = $target->versionable;
+
+            RelationSnapshotManager::restore(
+                $record,
+                RelationSnapshotManager::forVersion($target),
+            );
+        });
+    }
+
+    it('never touches a foreign row that re-used the primary key of a removed child', function () {
+        $post = createVersionablePost();
+        $comment = $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        dispatchRecordSaved($post); // v1: comment #X
+
+        $takenKey = $comment->getKey();
+        $comment->forceDelete();
+
+        // A foreign comment takes over the freed primary key.
+        $otherPost = createVersionablePost(['title' => 'Other post']);
+        $foreign = new Comment(['post_id' => $otherPost->getKey(), 'author' => 'Mallory', 'body' => 'Foreign row']);
+        $foreign->forceFill(['id' => $takenKey])->save();
+
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2: no comments on the original post
+
+        restoreVersionDirectly($post->refresh());
+
+        $foreign->refresh();
+
+        expect($foreign->post_id)->toBe($otherPost->getKey())
+            ->and($foreign->author)->toBe('Mallory')
+            ->and($foreign->body)->toBe('Foreign row')
+            // The snapshot's child was re-created under the original post
+            // with a fresh key instead of overwriting the foreign row.
+            ->and($post->comments()->count())->toBe(1)
+            ->and($post->comments()->first()->author)->toBe('Alice')
+            ->and($post->comments()->first()->getKey())->not->toBe($takenKey);
+    });
+
+    it('re-creates a hard-deleted child with its original key when the key is free', function () {
+        $post = createVersionablePost();
+        $comment = $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        dispatchRecordSaved($post); // v1
+
+        $originalKey = $comment->getKey();
+        $comment->forceDelete();
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        restoreVersionDirectly($post->refresh());
+
+        expect($post->comments()->count())->toBe(1)
+            ->and($post->comments()->first()->getKey())->toBe($originalKey)
+            ->and($post->comments()->first()->body)->toBe('First comment');
+    });
+
+    it('adopts a re-created row by matching the full attribute fingerprint', function () {
+        $post = createVersionablePost();
+        $comment = $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        dispatchRecordSaved($post); // v1
+
+        $comment->forceDelete();
+
+        // The user re-created the identical comment; it received a new key.
+        $recreated = $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+
+        expect($recreated->getKey())->not->toBe($comment->getKey());
+
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        restoreVersionDirectly($post->refresh());
+
+        expect($post->comments()->count())->toBe(1)
+            ->and($post->comments()->first()->getKey())->toBe($recreated->getKey());
+    });
+
+    it('uses configured identity columns when attributes changed since the snapshot', function () {
+        $post = ConfiguredVersionablePost::create([
+            'title' => 'Post Title',
+            'content' => 'Post Content',
+            'user_id' => $this->user->getKey(),
+        ]);
+        $comment = $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        dispatchRecordSaved($post); // v1
+
+        $comment->forceDelete();
+
+        // Same author, different body: the fingerprint no longer matches,
+        // the identity column does.
+        $post->comments()->create(['author' => 'Alice', 'body' => 'Rewritten already']);
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        restoreVersionDirectly($post->refresh());
+
+        expect($post->comments()->count())->toBe(1)
+            ->and($post->comments()->first()->body)->toBe('First comment');
+    });
+
+    it('can be told not to preserve primary keys when re-creating rows', function () {
+        $post = ConfiguredVersionablePost::create([
+            'title' => 'Post Title',
+            'content' => 'Post Content',
+            'user_id' => $this->user->getKey(),
+        ]);
+        $attachment = new Attachment(['name' => 'contract.pdf']);
+        $attachment->attachable()->associate($post);
+        $attachment->save();
+
+        // A second attachment so sqlite cannot silently reuse the freed key.
+        $other = new Attachment(['name' => 'other.pdf']);
+        $other->attachable()->associate($post);
+        $other->save();
+
+        dispatchRecordSaved($post); // v1
+
+        $originalKey = $attachment->getKey();
+        $attachment->delete(); // hard delete, the key stays free
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        restoreVersionDirectly($post->refresh());
+
+        $restored = $post->attachments()->where('name', 'contract.pdf')->first();
+
+        expect($restored)->not->toBeNull()
+            // preserve_ids is disabled for attachments: a fresh key is used
+            // even though the original one would still be free.
+            ->and($restored->getKey())->not->toBe($originalKey);
+    });
+
+    it('re-links pivots to re-created master records identified by fingerprint', function () {
+        $post = createVersionablePost();
+        $tag = Tag::create(['name' => 'Laravel']);
+        $post->tags()->attach($tag->getKey(), ['position' => 1]);
+        dispatchRecordSaved($post); // v1: tag #X
+
+        $tag->forceDelete();
+
+        // The same tag was re-created with a new key.
+        $recreated = Tag::create(['name' => 'Laravel']);
+
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        restoreVersionDirectly($post->refresh());
+
+        $tags = $post->tags()->withPivot('position')->get();
+
+        expect($tags)->toHaveCount(1)
+            ->and($tags->first()->getKey())->toBe($recreated->getKey())
+            ->and($tags->first()->pivot->position)->toBe(1);
+    });
+
+    it('drops pivot links whose master record can no longer be identified', function () {
+        $post = createVersionablePost();
+        $tag = Tag::create(['name' => 'Laravel']);
+        $post->tags()->attach($tag->getKey(), ['position' => 1]);
+        dispatchRecordSaved($post); // v1
+
+        $tag->forceDelete();
+        Tag::create(['name' => 'Something else']); // no fingerprint match
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        restoreVersionDirectly($post->refresh());
+
+        expect($post->tags()->count())->toBe(0);
+    });
+
+    it('re-points belongsTo foreign keys when the target row was re-created', function () {
+        $category = Category::create(['name' => 'Original Category']);
+        $post = createVersionablePost(['category_id' => $category->id]);
+        dispatchRecordSaved($post); // v1: category #1
+
+        $category->delete();
+        $recreated = Category::create(['name' => 'Original Category']);
+
+        $post->update(['title' => 'Second version', 'category_id' => null]);
+        dispatchRecordSaved($post); // v2: category null
+
+        restoreVersionDirectly($post->refresh());
+
+        $post->refresh();
+
+        // The contents revert restored the raw (dangling) foreign key #1;
+        // the belongsTo pass re-pointed it at the identified row #2.
+        expect($post->category_id)->toBe($recreated->getKey())
+            ->and($post->category->name)->toBe('Original Category');
+    });
+});
+
+describe('display configuration', function () {
+    function relationChangeSet(VersionablePost $post, string $name): RelationChangeSet
+    {
+        $latest = $post->latestVersion()->first();
+
+        $diff = new RelationDiff(
+            newVersion: $latest,
+            oldVersion: $latest->previousVersion(),
+            differOptions: ['fullContextIfIdentical' => true],
+            renderOptions: ['lineNumbers' => false, 'showHeader' => false, 'detailLevel' => 'word', 'spacesToNbsp' => false],
+        );
+
+        return collect($diff->changes())->firstWhere('name', $name);
+    }
+
+    it('labels rows with the configured title attribute', function () {
+        $post = ConfiguredVersionablePost::create([
+            'title' => 'Post Title',
+            'content' => 'Post Content',
+            'user_id' => $this->user->getKey(),
+        ]);
+        $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        dispatchRecordSaved($post); // v1
+
+        $post->comments()->first()->update(['author' => 'Alicia']);
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        $comments = relationChangeSet($post->refresh(), 'comments');
+
+        expect($comments)->not->toBeNull()
+            ->and($comments->updated)->toHaveCount(1)
+            // The configured 'author' title is shown next to the key.
+            ->and($comments->updated[0]->label())->toBe('#1 · Alicia')
+            // Only 'body' is configured to render, and it did not change.
+            ->and($comments->updated[0]->fields)->toBe([]);
+    });
+
+    it('renders only the configured fields for added records', function () {
+        $post = ConfiguredVersionablePost::create([
+            'title' => 'Post Title',
+            'content' => 'Post Content',
+            'user_id' => $this->user->getKey(),
+        ]);
+        dispatchRecordSaved($post); // v1: no comments
+
+        $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        $comments = relationChangeSet($post->refresh(), 'comments');
+
+        expect($comments->added)->toHaveCount(1)
+            ->and(array_keys($comments->added[0]->fields))->toBe(['body'])
+            ->and($comments->added[0]->label())->toBe('#1 · Alice');
+    });
+
+    it('supports callable titles', function () {
+        $post = ConfiguredVersionablePost::create([
+            'title' => 'Post Title',
+            'content' => 'Post Content',
+            'user_id' => $this->user->getKey(),
+        ]);
+        $post->tags()->attach(Tag::create(['name' => 'Laravel'])->getKey(), ['position' => 1]);
+        dispatchRecordSaved($post); // v1
+
+        $post->tags()->detach();
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        $tags = relationChangeSet($post->refresh(), 'tags');
+
+        expect($tags->removed)->toHaveCount(1)
+            ->and($tags->removed[0]->label())->toBe('#1 · TAG: Laravel');
+    });
+
+    it('guesses a sensible title from common attributes without configuration', function () {
+        $post = createVersionablePost();
+        $post->comments()->create(['author' => 'Alice', 'body' => 'First comment']);
+        dispatchRecordSaved($post); // v1
+
+        $post->comments()->first()->delete();
+        $post->update(['title' => 'Second version']);
+        dispatchRecordSaved($post); // v2
+
+        livewire(VersionablePostRevisions::class, ['record' => $post->getKey()])
+            ->assertOk()
+            ->assertSee('#1 · Alice');
     });
 });
