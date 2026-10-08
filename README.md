@@ -119,6 +119,36 @@ $table->actions([
 
 You are all set! Your app should store the model states and you can manage them in Filament.
 
+## Versioning Relationships
+
+By default only the model's own attributes are versioned. To also snapshot relationships (HasMany, HasOne, MorphMany, MorphOne, BelongsToMany, MorphToMany, and display-only BelongsTo / MorphTo / HasManyThrough / HasOneThrough), use the `HasVersionableRelations` concern and list the relationship names:
+
+```bash
+php artisan vendor:publish --tag="filament-versionable-migrations"
+php artisan migrate
+```
+
+```php
+use Mansoor\FilamentVersionable\Concerns\HasVersionableRelations;
+use Overtrue\LaravelVersionable\Versionable;
+
+class Post extends Model
+{
+    use Versionable;
+    use HasVersionableRelations;
+
+    protected $versionable = ['title', 'content'];
+
+    protected array $versionableRelations = ['comments', 'tags'];
+}
+```
+
+- Every created version stores a snapshot of the listed relationships, and the revisions page renders per-relation change sets (added / updated / removed records with field-level diffs, plus pivot column changes).
+- When **only** a relationship changes, Filament's attribute watcher would normally create no version at all — the plugin now records one automatically after Filament saves the record.
+- Restoring a revision automatically restores the relationship state as well: children are updated or recreated by primary key, soft-deleted children are revived, children missing from the snapshot are removed, and pivot relations are synced (including pivot columns).
+- `BelongsTo`, `MorphTo`, `HasManyThrough` and `HasOneThrough` are recorded for reference only — restoring them would either duplicate data owned by other records or is not directly writable, so their snapshots are never applied. A `BelongsTo` foreign key is still restored like any other versioned attribute when listed in `$versionable`.
+- Models that don't use the concern behave exactly as before.
+
 ## Customisation
 
 If you want to change the UI for Revisions page, you may publish the publish the views to do so.

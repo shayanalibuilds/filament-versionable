@@ -2,6 +2,16 @@
 
 All notable changes to `filament-versionable` will be documented in this file.
 
+## Unreleased
+
+### New Features
+
+* **Relationship versioning** ([#28](https://github.com/mansoorkhan96/filament-versionable/issues/28)) — opt-in via the new `HasVersionableRelations` concern:
+  * Snapshots of versionable relationships are stored with every version in a new nullable `relations` JSON column (`php artisan vendor:publish --tag="filament-versionable-migrations"`).
+  * Versions are now also recorded when **only** relationships change, not just when the model's own attributes are dirty.
+  * The revisions page renders per-relation change sets with added / updated / removed records and field-level diffs, including pivot column changes.
+  * Restoring a revision automatically restores the relationship state (children upserted by primary key, soft-deleted children revived, missing children removed, pivot relations synced).
+
 ## v0.0.13 - 2025-03-28
 
 ### What's Changed
